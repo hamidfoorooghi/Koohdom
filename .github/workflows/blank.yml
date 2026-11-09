@@ -6,9 +6,6 @@ on:
   push:
     branches:
       - "**"
-    paths:
-      - "**"
-      - "!README.md"
 
 permissions:
   contents: read
@@ -30,85 +27,120 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
 
-      - name: Install required Android SDK
+      - name: Install Android SDK packages
         run: |
+          yes | sdkmanager --licenses || true
           sdkmanager --install \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      - name: Extract project archives
+      - name: Extract ZIP archives
+        shell: bash
         run: |
-          set -e
-          find . -type f -iname "*.zip" \
-            -not -path "./.git/*" \
-            -print0 |
+          set -euo pipefail
+
           while IFS= read -r -d '' archive; do
             echo "Extracting: $archive"
+
             destination="${archive%.*}_extracted"
             mkdir -p "$destination"
+
             unzip -oq "$archive" -d "$destination"
-          done
+          done < <(
+            find . -type f -iname "*.zip" \
+              -not -path "./.git/*" \
+              -print0
+          )
 
       - name: Locate Android project
         id: locate
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          GRADLE_FILE=$(find . -type f \
-            -name settings.gradle -o \
-            -name settings.gradle.kts | head -n 1)
+          PROJECT_DIR=""
 
-          if [ -z "$GRADLE_FILE" ]; then
-            GRADLE_FILE=$(find . -type f \
-              \( -name build.gradle -o \
-                 -name build.gradle.kts \) \
-              -not -path "*/build/*" | head -n 1)
+          while IFS= read -r -d '' file; do
+            candidate=$(dirname "$file")
+
+            if [ -f "$candidate/gradlew" ]; then
+              PROJECT_DIR="$candidate"
+              break
+            fi
+          done < <(
+            find . -type f \
+              \( -name settings.gradle \
+              -o -name settings.gradle.kts \) \
+              -not -path "*/build/*" \
+              -print0
+          )
+
+          if [ -z "$PROJECT_DIR" ]; then
+            while IFS= read -r -d '' file; do
+              candidate=$(dirname "$file")
+
+              if [ -f "$candidate/gradlew" ]; then
+                PROJECT_DIR="$candidate"
+                break
+              fi
+            done < <(
+              find . -type f \
+                \( -name build.gradle \
+                -o -name build.gradle.kts \) \
+                -not -path "*/build/*" \
+                -print0
+            )
           fi
 
-          if [ -z "$GRADLE_FILE" ]; then
-            echo "No Gradle Android project found."
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android Gradle project with gradlew not found."
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$GRADLE_FILE")
-
-          while [ "$PROJECT_DIR" != "." ] &&
-                [ ! -f "$PROJECT_DIR/gradlew" ]; do
-            PROJECT_DIR=$(dirname "$PROJECT_DIR")
-          done
-
-          if [ ! -f "$PROJECT_DIR/gradlew" ]; then
-            echo "Gradle wrapper not found."
-            exit 1
-          fi
-
+          echo "Project directory: $PROJECT_DIR"
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Build APK
+      - name: Build Debug APK
         working-directory: ${{ steps.locate.outputs.project_dir }}
+        shell: bash
         run: |
-          set -e
-          chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace assembleDebug
+          set -euo pipefail
 
-      - name: Locate APK files
+          chmod +x gradlew
+
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            --warning-mode all \
+            assembleDebug
+
+      - name: Find generated APK
         id: apk
+        shell: bash
         run: |
+          set -euo pipefail
+
           mkdir -p "$GITHUB_WORKSPACE/apk-output"
 
           find "${{ steps.locate.outputs.project_dir }}" \
-            -type f -iname "*.apk" \
+            -type f \
             -path "*/build/outputs/apk/*" \
+            -iname "*.apk" \
             -exec cp {} "$GITHUB_WORKSPACE/apk-output/" \;
 
           if [ -z "$(ls -A "$GITHUB_WORKSPACE/apk-output")" ]; then
-            echo "No APK generated."
+            echo "ERROR: No APK file generated."
             exit 1
           fi
 
-      - name: Upload APK
+          echo "Generated APK files:"
+          ls -lh "$GITHUB_WORKSPACE/apk-output"
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: Android-APK
